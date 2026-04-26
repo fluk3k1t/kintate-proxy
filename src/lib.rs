@@ -16,5 +16,5 @@
 pub mod policy;
 pub mod proxy;
 
-pub use policy::{Policy, Rule, RuleData, Action};
+pub use policy::{AccessSession, Action, Policy, Rule, RuleData};
 pub use proxy::PolicyProxy;

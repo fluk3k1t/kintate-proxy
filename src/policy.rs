@@ -1,7 +1,8 @@
 //! Policy database implementation using rusqlite
-use chrono::Local;
+use chrono::{DateTime, Local};
 use regex::Regex;
 use rusqlite::{Connection, Result as SqliteResult, params};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,9 +45,20 @@ pub struct Rule {
     pub compiled_regex: Option<Regex>,
 }
 
+#[derive(Clone, Debug)]
+pub struct AccessSession {
+    pub device_ip: String,
+    pub target_domain: String,
+    pub action: Action,
+    pub first_access: DateTime<Local>,
+    pub last_access: DateTime<Local>,
+    pub request_count: i32,
+}
+
 pub struct Policy {
     conn: Arc<Mutex<Connection>>,
     rules_cache: Arc<RwLock<Vec<Arc<Rule>>>>,
+    active_sessions: Arc<RwLock<HashMap<String, AccessSession>>>,
 }
 
 impl Policy {
@@ -72,9 +84,23 @@ impl Policy {
             [],
         )?;
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS access_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_ip TEXT NOT NULL,
+                target_domain TEXT NOT NULL,
+                action TEXT NOT NULL,
+                first_access TIMESTAMP,
+                last_access TIMESTAMP,
+                request_count INTEGER
+            )",
+            [],
+        )?;
+
         let policy = Self {
             conn: Arc::new(Mutex::new(conn)),
             rules_cache: Arc::new(RwLock::new(Vec::new())),
+            active_sessions: Arc::new(RwLock::new(HashMap::new())),
         };
 
         policy.reload_cache()?;
@@ -165,6 +191,146 @@ impl Policy {
         cache.clone() // shallow copy of Arcs
     }
 
+    pub fn record_access(&self, device_ip: &str, target_domain: &str, action: &Action) {
+        let key = format!("{}|{}|{}", device_ip, target_domain, action.as_str());
+        let now = Local::now();
+        let mut sessions = self.active_sessions.write().unwrap();
+
+        if let Some(session) = sessions.get_mut(&key) {
+            session.last_access = now;
+            session.request_count += 1;
+        } else {
+            sessions.insert(
+                key,
+                AccessSession {
+                    device_ip: device_ip.to_string(),
+                    target_domain: target_domain.to_string(),
+                    action: action.clone(),
+                    first_access: now,
+                    last_access: now,
+                    request_count: 1,
+                },
+            );
+        }
+    }
+
+    pub fn sweep_sessions(&self, timeout_secs: i64) -> SqliteResult<()> {
+        let now = Local::now();
+
+        // Extract expired sessions
+        let expired_sessions: Vec<_> = {
+            let mut sessions = self.active_sessions.write().unwrap();
+            let mut to_remove = Vec::new();
+
+            for (key, session) in sessions.iter() {
+                if (now - session.last_access).num_seconds() > timeout_secs {
+                    to_remove.push(key.clone());
+                }
+            }
+
+            to_remove
+                .into_iter()
+                .filter_map(|k| sessions.remove(&k))
+                .collect()
+        };
+
+        if expired_sessions.is_empty() {
+            return Ok(());
+        }
+
+        // Save to DB
+        let conn = self.conn.lock().unwrap();
+
+        for session in expired_sessions {
+            tracing::info!("Saving session: {:?}", session);
+
+            conn.execute(
+                "INSERT INTO access_logs (device_ip, target_domain, action, first_access, last_access, request_count)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    session.device_ip,
+                    session.target_domain,
+                    session.action.as_str(),
+                    session.first_access.to_rfc3339(),
+                    session.last_access.to_rfc3339(),
+                    session.request_count
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn get_access_logs(
+        &self,
+        limit: usize,
+        ip_filter: Option<&str>,
+    ) -> SqliteResult<Vec<AccessSession>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = if ip_filter.is_some() {
+            "SELECT device_ip, target_domain, action, first_access, last_access, request_count
+             FROM access_logs WHERE device_ip = ?1
+             ORDER BY last_access DESC LIMIT ?2"
+        } else {
+            "SELECT device_ip, target_domain, action, first_access, last_access, request_count
+             FROM access_logs
+             ORDER BY last_access DESC LIMIT ?1"
+        };
+
+        let mut stmt = conn.prepare(sql)?;
+
+        let rows = if let Some(ip) = ip_filter {
+            stmt.query_map(rusqlite::params![ip, limit as i64], |row| {
+                let action_str: String = row.get(2)?;
+                Ok(AccessSession {
+                    device_ip: row.get(0)?,
+                    target_domain: row.get(1)?,
+                    action: Action::from_str(&action_str),
+                    first_access: row
+                        .get::<_, String>(3)
+                        .ok()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                        .map(|dt| dt.with_timezone(&Local))
+                        .unwrap_or_else(Local::now),
+                    last_access: row
+                        .get::<_, String>(4)
+                        .ok()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                        .map(|dt| dt.with_timezone(&Local))
+                        .unwrap_or_else(Local::now),
+                    request_count: row.get(5)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect()
+        } else {
+            stmt.query_map(rusqlite::params![limit as i64], |row| {
+                let action_str: String = row.get(2)?;
+                Ok(AccessSession {
+                    device_ip: row.get(0)?,
+                    target_domain: row.get(1)?,
+                    action: Action::from_str(&action_str),
+                    first_access: row
+                        .get::<_, String>(3)
+                        .ok()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                        .map(|dt| dt.with_timezone(&Local))
+                        .unwrap_or_else(Local::now),
+                    last_access: row
+                        .get::<_, String>(4)
+                        .ok()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                        .map(|dt| dt.with_timezone(&Local))
+                        .unwrap_or_else(Local::now),
+                    request_count: row.get(5)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect()
+        };
+
+        Ok(rows)
+    }
+
     /// Evaluates if a request is allowed based on the rules.
     /// Returns Action::Allow or Action::Block.
     pub fn evaluate(&self, domain: &str, path: &str, client_ip: Option<&str>) -> Action {
@@ -230,6 +396,7 @@ impl Clone for Policy {
         Self {
             conn: Arc::clone(&self.conn),
             rules_cache: Arc::clone(&self.rules_cache),
+            active_sessions: Arc::clone(&self.active_sessions),
         }
     }
 }

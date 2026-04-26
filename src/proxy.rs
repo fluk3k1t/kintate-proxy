@@ -24,10 +24,12 @@ impl PolicyProxy {
     pub async fn serve(
         self,
         addr: impl tokio::net::ToSocketAddrs,
+        mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let client = DefaultClient::new();
         let policy = self.policy;
 
+        let policy_for_gc = policy.clone();
         let server = self
             .inner
             .bind(
@@ -40,8 +42,25 @@ impl PolicyProxy {
             )
             .await?;
 
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                if let Err(e) = policy_for_gc.sweep_sessions(5 * 60) {
+                    tracing::error!("Error sweeping access sessions: {}", e);
+                }
+            }
+        });
+
         info!("HTTP Proxy is listening");
-        server.await;
+
+        tokio::select! {
+            _ = server => {
+                tracing::info!("Server exited naturally.");
+            }
+            _ = &mut shutdown_rx => {
+                tracing::info!("Server received shutdown signal.");
+            }
+        }
 
         Ok(())
     }
@@ -69,6 +88,13 @@ async fn handle_request(
     let client_ip = remote_addr.map(|addr| addr.ip().to_string());
 
     let action = policy.evaluate(&domain, &path, client_ip.as_deref());
+
+    if let Some(ip) = &client_ip {
+        let ip_only = ip.split(':').next().unwrap_or(ip);
+        policy.record_access(ip_only, &domain, &action);
+    }
+
+    //tracing::error!("[{}] {} - {:?}", domain, req.method(), action);
 
     match action {
         Action::Allow => {

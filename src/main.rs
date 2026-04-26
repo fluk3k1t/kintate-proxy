@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use kintate_proxy::policy::{Action, Policy, RuleData};
+use kintate_proxy::policy::{AccessSession, Action, Policy, RuleData};
 use kintate_proxy::proxy::PolicyProxy;
 use moka::sync::Cache;
 use rcgen::Issuer;
@@ -48,6 +48,15 @@ enum Command {
     Manage,
     /// List all policies
     List,
+    /// Show access logs from the database
+    Logs {
+        /// Maximum number of records to show (default: 50)
+        #[arg(long, default_value = "50")]
+        limit: usize,
+        /// Filter by specific device IP
+        #[arg(long)]
+        ip: Option<String>,
+    },
 }
 
 /// Create a root issuer from existing certificate and key files
@@ -104,6 +113,69 @@ fn prompt_opt(message: &str) -> Option<String> {
     if res.is_empty() { None } else { Some(res) }
 }
 
+fn print_access_logs(logs: &[AccessSession]) {
+    if logs.is_empty() {
+        println!("No access logs found.");
+        println!(
+            "(Logs are written to DB after sessions expire. Use `--manage` and wait, or restart with Ctrl+C.)"
+        );
+        return;
+    }
+
+    let col_ip = 16;
+    let col_domain = 32;
+    let col_action = 7;
+    let col_count = 7;
+    let col_first = 20;
+    let col_last = 20;
+
+    println!();
+    println!(
+        "{:<col_ip$} | {:<col_domain$} | {:<col_action$} | {:<col_count$} | {:<col_first$} | {:<col_last$}",
+        "Device IP",
+        "Target Domain",
+        "Action",
+        "Reqs",
+        "First Access",
+        "Last Access",
+        col_ip = col_ip,
+        col_domain = col_domain,
+        col_action = col_action,
+        col_count = col_count,
+        col_first = col_first,
+        col_last = col_last,
+    );
+    println!(
+        "{}",
+        "-".repeat(col_ip + col_domain + col_action + col_count + col_first + col_last + 15)
+    );
+
+    for log in logs {
+        let action_str = match log.action {
+            Action::Allow => "Allow",
+            Action::Block => "BLOCK",
+        };
+        let first = log.first_access.format("%Y-%m-%d %H:%M:%S").to_string();
+        let last = log.last_access.format("%Y-%m-%d %H:%M:%S").to_string();
+        println!(
+            "{:<col_ip$} | {:<col_domain$} | {:<col_action$} | {:<col_count$} | {:<col_first$} | {:<col_last$}",
+            log.device_ip,
+            log.target_domain,
+            action_str,
+            log.request_count,
+            first,
+            last,
+            col_ip = col_ip,
+            col_domain = col_domain,
+            col_action = col_action,
+            col_count = col_count,
+            col_first = col_first,
+            col_last = col_last,
+        );
+    }
+    println!();
+}
+
 /// Interactive policy management
 fn interactive_manage(policy: &Policy) -> Result<(), Box<dyn std::error::Error>> {
     loop {
@@ -111,7 +183,8 @@ fn interactive_manage(policy: &Policy) -> Result<(), Box<dyn std::error::Error>>
         println!("1. List Rules");
         println!("2. Add Rule");
         println!("3. Delete Rule");
-        println!("4. Exit");
+        println!("4. View Access Logs");
+        println!("5. Exit");
 
         let choice = prompt("Select: ");
 
@@ -196,6 +269,16 @@ fn interactive_manage(policy: &Policy) -> Result<(), Box<dyn std::error::Error>>
                 }
             }
             "4" => {
+                let limit_str = prompt("Show last N records (default: 50): ");
+                let limit = limit_str.parse::<usize>().unwrap_or(50);
+                let ip_str = prompt("Filter by IP (leave blank for all): ");
+                let ip_filter = if ip_str.is_empty() { None } else { Some(ip_str.as_str()) };
+                match policy.get_access_logs(limit, ip_filter) {
+                    Ok(logs) => print_access_logs(&logs),
+                    Err(e) => println!("Error fetching logs: {}", e),
+                }
+            }
+            "5" => {
                 return Ok(());
             }
             _ => {
@@ -243,20 +326,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Parse listen address
             let addr: SocketAddr = listen.parse()?;
 
+            // Shutdown oneshot channel: send () to stop the server gracefully
+            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+            // Wrap in Arc<Mutex<Option<...>>> so both threads can take it
+            let shutdown_tx = std::sync::Arc::new(std::sync::Mutex::new(Some(shutdown_tx)));
+
             // Spawn interactive manage thread if requested
             if manage {
                 let policy_for_manage = policy.clone();
+                let shutdown_tx = shutdown_tx.clone();
                 tokio::task::spawn_blocking(move || {
                     println!("\nStarting interactive management...");
                     if let Err(e) = interactive_manage(&policy_for_manage) {
                         tracing::error!("Interactive management error: {}", e);
                     }
-                    println!("Interactive management session ended. Serving continues...");
+                    println!("\nExiting...");
+                    // Signal server to stop
+                    if let Ok(mut lock) = shutdown_tx.lock() {
+                        if let Some(tx) = lock.take() {
+                            let _ = tx.send(());
+                        }
+                    }
                 });
             }
 
-            // Start serving
-            policy_proxy.serve(addr).await?;
+            // Ctrl+C also sends shutdown signal
+            let shutdown_tx_ctrlc = shutdown_tx.clone();
+            let policy_for_ctrlc = policy.clone();
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                tracing::info!("Ctrl+C received. Flushing access logs...");
+                if let Err(e) = policy_for_ctrlc.sweep_sessions(-1) {
+                    tracing::error!("Failed to flush: {}", e);
+                } else {
+                    tracing::info!("Access logs flushed.");
+                }
+                if let Ok(mut lock) = shutdown_tx_ctrlc.lock() {
+                    if let Some(tx) = lock.take() {
+                        let _ = tx.send(());
+                    }
+                }
+            });
+
+            // Start serving (blocks until shutdown signal)
+            policy_proxy.serve(addr, shutdown_rx).await?;
+
+            // Final flush on natural exit
+            tracing::info!("Flushing remaining access logs...");
+            let _ = policy.sweep_sessions(-1);
         }
         Some(Command::Manage) => {
             interactive_manage(&policy)?;
@@ -274,6 +391,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
             }
+        }
+        Some(Command::Logs { limit, ip }) => {
+            let logs = policy.get_access_logs(limit, ip.as_deref())?;
+            print_access_logs(&logs);
         }
         None => {
             // No subcommand, show help
