@@ -76,8 +76,6 @@ impl Policy {
     pub fn new(db_path: &str) -> SqliteResult<Self> {
         let conn = Connection::open(db_path)?;
 
-        // Update table schema: remove time columns, add tag column
-        let _ = conn.execute("DROP TABLE IF EXISTS rules", []);
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS rules (
@@ -193,6 +191,26 @@ impl Policy {
             ],
         )?;
         drop(conn); // release lock before reloading cache
+        self.reload_cache()?;
+        Ok(())
+    }
+
+    pub fn update_rule(&self, id: i64, data: RuleData) -> SqliteResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE rules SET priority = ?1, action = ?2, name = ?3, domain = ?4, tag = ?5, path_pattern = ?6, client_ip = ?7 WHERE id = ?8",
+            params![
+                data.priority,
+                data.action.as_str(),
+                data.name,
+                data.domain,
+                data.tag,
+                data.path_pattern,
+                data.client_ip,
+                id,
+            ],
+        )?;
+        drop(conn);
         self.reload_cache()?;
         Ok(())
     }
