@@ -1,4 +1,5 @@
-use crate::policy::{Action, AccessSession, DomainTag, Policy, Rule, RuleData};
+use crate::policy::{Action, DomainTag, LogStatus, LogEntry, Policy, Rule, RuleData};
+use chrono::Local;
 use crate::limit::{LimitManager, LimitRule};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
@@ -10,10 +11,10 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Tabs},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Tabs, List, ListItem, ListState},
     Terminal,
 };
-use std::{error::Error, io, time::{Duration, Instant}};
+use std::{error::Error, io, time::{Duration, Instant}, sync::{Arc, Mutex}};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -21,11 +22,12 @@ enum Tab {
     Logs,
     Tags,
     Limits,
+    Errors,
 }
 
 impl Tab {
     fn all() -> Vec<Tab> {
-        vec![Tab::Rules, Tab::Logs, Tab::Tags, Tab::Limits]
+        vec![Tab::Rules, Tab::Logs, Tab::Tags, Tab::Limits, Tab::Errors]
     }
 
     fn title(&self) -> &'static str {
@@ -34,6 +36,46 @@ impl Tab {
             Tab::Logs => " Logs (L) ",
             Tab::Tags => " Tags (T) ",
             Tab::Limits => " Limits (U) ",
+            Tab::Errors => " Errors (E) ",
+        }
+    }
+}
+
+pub struct TuiLogger {
+    logs: Arc<Mutex<Vec<String>>>,
+}
+
+impl TuiLogger {
+    pub fn new(logs: Arc<Mutex<Vec<String>>>) -> Self {
+        Self { logs }
+    }
+}
+
+impl<S> tracing_subscriber::Layer<S> for TuiLogger
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut visitor = LogVisitor(String::new());
+        event.record(&mut visitor);
+        if let Ok(mut logs) = self.logs.lock() {
+            logs.push(format!("[{}] {}", event.metadata().level(), visitor.0));
+            if logs.len() > 100 {
+                logs.remove(0);
+            }
+        }
+    }
+}
+
+struct LogVisitor(String);
+impl tracing::field::Visit for LogVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.0 = format!("{:?}", value);
         }
     }
 }
@@ -57,15 +99,17 @@ pub struct App {
     should_quit: bool,
 
     rules: Vec<std::sync::Arc<Rule>>,
-    logs: Vec<AccessSession>,
+    logs: Vec<LogEntry>,
     tags: Vec<DomainTag>,
     limits: Vec<LimitRule>,
+    error_logs: Arc<Mutex<Vec<String>>>,
 
     // Selection states
     rule_state: TableState,
     log_state: TableState,
     tag_state: TableState,
     limit_state: TableState,
+    error_state: ListState,
 
     // Form states
     form_fields: Vec<(String, String)>, // (Label, Value)
@@ -75,7 +119,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(policy: Policy, limit_manager: LimitManager) -> Self {
+    pub fn new(policy: Policy, limit_manager: LimitManager, error_logs: Arc<Mutex<Vec<String>>>) -> Self {
         Self {
             policy,
             limit_manager,
@@ -86,10 +130,12 @@ impl App {
             logs: Vec::new(),
             tags: Vec::new(),
             limits: Vec::new(),
+            error_logs,
             rule_state: TableState::default().with_selected(Some(0)),
             log_state: TableState::default().with_selected(Some(0)),
             tag_state: TableState::default().with_selected(Some(0)),
             limit_state: TableState::default().with_selected(Some(0)),
+            error_state: ListState::default().with_selected(Some(0)),
             form_fields: Vec::new(),
             form_focus: 0,
             last_update: Instant::now(),
@@ -128,6 +174,7 @@ impl App {
                             KeyCode::Char('l') => self.active_tab = Tab::Logs,
                             KeyCode::Char('t') => self.active_tab = Tab::Tags,
                             KeyCode::Char('u') => self.active_tab = Tab::Limits,
+                            KeyCode::Char('s') => self.active_tab = Tab::Errors,
                             KeyCode::Tab => self.next_tab(),
                             KeyCode::Char('r') => self.refresh_data(),
                             KeyCode::Char('a') => self.init_add_mode(),
@@ -135,6 +182,8 @@ impl App {
                             KeyCode::Char('d') => self.delete_selected()?,
                             KeyCode::Up => self.move_selection(-1),
                             KeyCode::Down => self.move_selection(1),
+                            KeyCode::PageUp => self.move_selection(-15),
+                            KeyCode::PageDown => self.move_selection(15),
                             _ => {}
                         },
                         _ => match key.code {
@@ -178,6 +227,10 @@ impl App {
             }
 
             if self.should_quit {
+                // Ensure all active sessions are saved to DB before exiting
+                if let Err(e) = self.policy.sweep_sessions(0) {
+                    tracing::error!("Failed to sweep on quit: {}", e);
+                }
                 break;
             }
 
@@ -199,11 +252,32 @@ impl App {
     }
 
     fn move_selection(&mut self, delta: i32) {
+        if self.active_tab == Tab::Errors {
+            let len = self.error_logs.lock().unwrap().len();
+            if len == 0 { return; }
+            let i = match self.error_state.selected() {
+                Some(i) => {
+                    let next = i as i32 + delta;
+                    if next < 0 {
+                        0
+                    } else if next >= len as i32 {
+                        len - 1
+                    } else {
+                        next as usize
+                    }
+                }
+                None => 0,
+            };
+            self.error_state.select(Some(i));
+            return;
+        }
+
         let (state, len) = match self.active_tab {
             Tab::Rules => (&mut self.rule_state, self.rules.len()),
             Tab::Logs => (&mut self.log_state, self.logs.len()),
             Tab::Tags => (&mut self.tag_state, self.tags.len()),
             Tab::Limits => (&mut self.limit_state, self.limits.len()),
+            Tab::Errors => unreachable!(),
         };
 
         if len == 0 {
@@ -329,8 +403,12 @@ impl App {
                     }
                 }
             }
-            Tab::Logs => {
-                self.policy.clear_access_logs()?;
+            Tab::Logs | Tab::Errors => {
+                if self.active_tab == Tab::Logs {
+                    self.policy.clear_access_logs()?;
+                } else {
+                    self.error_logs.lock().unwrap().clear();
+                }
             }
         }
         self.refresh_data();
@@ -397,7 +475,7 @@ impl App {
         self.rules = self.policy.get_all_rules();
         self.logs = self
             .policy
-            .get_access_logs(50, None, None)
+            .get_combined_logs(50)
             .unwrap_or_default();
         self.tags = self.policy.get_all_domain_tags().unwrap_or_default();
         self.limits = self.limit_manager.get_all_limits().unwrap_or_default();
@@ -431,12 +509,13 @@ impl App {
             })
             .collect();
 
+        let header_block = Block::default()
+            .borders(Borders::ALL)
+            .title(Line::from(" Kintate Proxy Manager ").alignment(ratatui::layout::Alignment::Left))
+            .title(Line::from(format!(" {} ", Local::now().format("%Y-%m-%d %H:%M:%S"))).alignment(ratatui::layout::Alignment::Right));
+
         let tabs = Tabs::new(titles)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Kintate Proxy Manager "),
-            )
+            .block(header_block)
             .select(
                 Tab::all()
                     .into_iter()
@@ -451,6 +530,7 @@ impl App {
             Tab::Logs => self.render_logs(f, chunks[1]),
             Tab::Tags => self.render_tags(f, chunks[1]),
             Tab::Limits => self.render_limits(f, chunks[1]),
+            Tab::Errors => self.render_errors(f, chunks[1]),
         }
 
         // Footer
@@ -509,13 +589,25 @@ impl App {
     }
 
     fn render_logs(&mut self, f: &mut ratatui::Frame, area: Rect) {
-        let header_cells = ["Time", "IP", "Target / Tag", "Action", "Reqs"]
+        let header_cells = ["Status", "Start", "Last", "IP", "Target / Tag", "Action", "Reqs"]
             .iter()
             .map(|h| Cell::from(*h).style(Style::default().fg(Color::Yellow)));
         let header = Row::new(header_cells).height(1).bottom_margin(1);
 
-        let rows = self.logs.iter().map(|log| {
+        let rows = self.logs.iter().map(|entry| {
+            let log = &entry.session;
+            let status_style = match entry.status {
+                LogStatus::Active => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                LogStatus::Persistent => Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
+            };
+            let status_text = match entry.status {
+                LogStatus::Active => "Active",
+                LogStatus::Persistent => "Saved",
+            };
+
             Row::new(vec![
+                Cell::from(status_text).style(status_style),
+                Cell::from(log.first_access.format("%H:%M:%S").to_string()),
                 Cell::from(log.last_access.format("%H:%M:%S").to_string()),
                 Cell::from(log.device_ip.clone()),
                 Cell::from(log.target_domain.clone()),
@@ -527,19 +619,24 @@ impl App {
         let t = Table::new(
             rows,
             [
-                Constraint::Length(10),
-                Constraint::Length(16),
-                Constraint::Percentage(50),
                 Constraint::Length(8),
-                Constraint::Length(6),
+                Constraint::Length(10),
+                Constraint::Length(10),
+                Constraint::Length(15),
+                Constraint::Percentage(35),
+                Constraint::Length(8),
+                Constraint::Length(5),
             ],
         )
         .header(header)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Session Activity (Flushed) "),
-        );
+                .title(" Access Activity (Combined Active & Saved) "),
+        )
+        .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+        .highlight_symbol(">> ");
+
         f.render_stateful_widget(t, area, &mut self.log_state);
     }
 
@@ -676,5 +773,30 @@ impl App {
                 Constraint::Percentage((100 - percent_x) / 2),
             ])
             .split(popup_layout[1])[1]
+    }
+
+    fn render_errors(&mut self, f: &mut ratatui::Frame, area: Rect) {
+        let logs = self.error_logs.lock().unwrap();
+        let items: Vec<ListItem> = logs
+            .iter()
+            .rev() // show newest on top
+            .map(|log| {
+                let style = if log.contains("ERROR") {
+                    Style::default().fg(Color::Red)
+                } else if log.contains("WARN") {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default().fg(Color::Gray)
+                };
+                ListItem::new(log.as_str()).style(style)
+            })
+            .collect();
+
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL).title(" System Errors / Logs "))
+            .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+            .highlight_symbol(">> ");
+
+        f.render_stateful_widget(list, area, &mut self.error_state);
     }
 }

@@ -7,10 +7,14 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use kintate_proxy::policy::{AccessSession, Policy};
+use kintate_proxy::limit::LimitManager;
+use kintate_proxy::policy::{Policy, AccessSession};
 use kintate_proxy::proxy::PolicyProxy;
+use kintate_proxy::tui_app::{App as TuiApp, TuiLogger};
 use moka::sync::Cache;
 use rcgen::Issuer;
+use std::sync::{Arc, Mutex};
+use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
 
 /// Command-line arguments
@@ -99,9 +103,7 @@ fn create_new_root_issuer() -> Issuer<'static, rcgen::KeyPair> {
     rcgen::Issuer::new(params, signing_key)
 }
 
-use kintate_proxy::TuiApp;
 
-use kintate_proxy::limit::LimitManager;
 
 // ... (skipping some unchanged code)
 
@@ -156,8 +158,13 @@ fn print_access_logs(logs: &[AccessSession]) {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let opt = Opt::parse();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+    let error_logs = Arc::new(Mutex::new(Vec::new()));
+    let tui_logger = TuiLogger::new(error_logs.clone());
+
+    tracing_subscriber::registry()
+        .with(EnvFilter::from_default_env())
+        .with(tracing_subscriber::fmt::layer()) // Still keep console for non-TUI runs
+        .with(tui_logger)
         .init();
 
     let policy = Policy::new(opt.database.to_str().unwrap())?;
@@ -187,10 +194,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let p = policy.clone();
                 let l = limit_manager.clone();
                 let s = shutdown_tx.clone();
+                let e = error_logs.clone();
                 tokio::task::spawn_blocking(move || {
-                    let mut app = TuiApp::new(p, l);
-                    if let Err(e) = app.run() {
-                        tracing::error!("TUI Error: {}", e);
+                    let mut app = TuiApp::new(p, l, e);
+                    if let Err(err) = app.run() {
+                        tracing::error!("TUI Error: {}", err);
                     }
                     if let Ok(mut lock) = s.lock() {
                         if let Some(tx) = lock.take() {
@@ -206,8 +214,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                    // First flush sessions to DB
-                    if let Err(e) = policy_for_limits.sweep_sessions(0) {
+                    // First flush sessions to DB (idle for 5 mins)
+                    if let Err(e) = policy_for_limits.sweep_sessions(300) {
                         tracing::error!("Failed to sweep: {}", e);
                     }
                     // Then enforce limits
@@ -220,7 +228,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             policy_proxy.serve(addr, shutdown_rx).await?;
         }
         Some(Command::Manage) => {
-            let mut app = TuiApp::new(policy, limit_manager);
+            let mut app = TuiApp::new(policy, limit_manager, error_logs);
             app.run()?;
         }
         Some(Command::List) => {

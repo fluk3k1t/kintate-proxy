@@ -72,6 +72,18 @@ pub struct Policy {
     tag_cache: Arc<RwLock<HashMap<String, String>>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LogStatus {
+    Active,
+    Persistent,
+}
+
+#[derive(Clone, Debug)]
+pub struct LogEntry {
+    pub session: AccessSession,
+    pub status: LogStatus,
+}
+
 impl Policy {
     pub fn new(db_path: &str) -> SqliteResult<Self> {
         let conn = Connection::open(db_path)?;
@@ -242,7 +254,8 @@ impl Policy {
     }
 
     pub fn record_access(&self, device_ip: &str, target_domain: &str, action: &Action) {
-        let sld = extract_sld(target_domain);
+        let target_domain = target_domain.to_lowercase();
+        let sld = extract_sld(&target_domain);
         let tag = {
             let cache = self.tag_cache.read().unwrap();
             cache.get(&sld).cloned()
@@ -391,6 +404,43 @@ impl Policy {
         Ok(rows)
     }
 
+    pub fn get_combined_logs(
+        &self,
+        limit: usize,
+    ) -> SqliteResult<Vec<LogEntry>> {
+        let mut combined = Vec::new();
+
+        // 1. Get active sessions
+        {
+            let sessions = self.active_sessions.read().unwrap();
+            for session in sessions.values() {
+                combined.push(LogEntry {
+                    session: session.clone(),
+                    status: LogStatus::Active,
+                });
+            }
+        }
+
+        // 2. Get persistent logs
+        let db_logs = self.get_access_logs(limit, None, None)?;
+        for log in db_logs {
+            combined.push(LogEntry {
+                session: log,
+                status: LogStatus::Persistent,
+            });
+        }
+
+        // Sort by last_access DESC
+        combined.sort_by(|a, b| b.session.last_access.cmp(&a.session.last_access));
+
+        // Limit results
+        if combined.len() > limit {
+            combined.truncate(limit);
+        }
+
+        Ok(combined)
+    }
+
     pub fn clear_access_logs(&self) -> SqliteResult<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM access_logs", [])?;
@@ -529,14 +579,15 @@ pub fn extract_sld(domain: &str) -> String {
     let parts: Vec<&str> = domain.split('.').collect();
     let n = parts.len();
     if n >= 3 {
-        // If TLD looks like a two-part TLD (e.g. co.jp, com.au) and has enough parts
         let tld = parts[n - 1];
         let sld_candidate = parts[n - 2];
-        // Common two-part TLDs are typically short (≤3 chars) like co, org, net, com
-        if sld_candidate.len() <= 3 && tld.len() == 2 && n >= 4 {
-            // e.g. example.co.jp -> parts = ["example", "co", "jp"] (n=3, need n>=4)
-            // www.example.co.jp -> parts[n-3] = "example"
-            return parts[n - 3].to_string();
+        // Common two-part TLDs (co.jp, com.au, etc)
+        // If the second-to-last part is short (<=3) and the TLD is 2-letter,
+        // we treat it as a two-part TLD.
+        if sld_candidate.len() <= 3 && tld.len() == 2 {
+            if n >= 3 {
+                return parts[n - 3].to_string();
+            }
         }
         // Standard: return second-to-last before TLD
         return parts[n - 2].to_string();
