@@ -15,6 +15,8 @@
 
 pub mod policy;
 pub mod proxy;
+pub mod limit;
 
-pub use policy::{AccessSession, Action, Policy, Rule, RuleData};
+pub use policy::{AccessSession, Action, DomainTag, Policy, Rule, RuleData};
 pub use proxy::PolicyProxy;
+pub use limit::{LimitManager, LimitRule};
