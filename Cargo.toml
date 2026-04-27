@@ -39,3 +39,5 @@ http = "1.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 regex = "1.12.3"
 chrono = "0.4.44"
+ratatui = "0.30.0"
+crossterm = "0.29.0"

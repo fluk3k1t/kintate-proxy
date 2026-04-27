@@ -3,12 +3,11 @@
 //! This is a sample application that demonstrates how to use the kintate-proxy library
 //! to create a MITM proxy with policy-based URL filtering.
 
-use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use kintate_proxy::policy::{AccessSession, Action, DomainTag, Policy, RuleData};
+use kintate_proxy::policy::{AccessSession, Policy};
 use kintate_proxy::proxy::PolicyProxy;
 use moka::sync::Cache;
 use rcgen::Issuer;
@@ -100,20 +99,9 @@ fn create_new_root_issuer() -> Issuer<'static, rcgen::KeyPair> {
     rcgen::Issuer::new(params, signing_key)
 }
 
-fn prompt(message: &str) -> String {
-    print!("{}", message);
-    io::stdout().flush().unwrap();
-    let mut input = String::new();
-    io::stdin().read_line(&mut input).unwrap();
-    input.trim().to_string()
-}
+use kintate_proxy::TuiApp;
 
-fn prompt_opt(message: &str) -> Option<String> {
-    let res = prompt(message);
-    if res.is_empty() { None } else { Some(res) }
-}
-
-use kintate_proxy::limit::{LimitManager, LimitRule};
+use kintate_proxy::limit::LimitManager;
 
 // ... (skipping some unchanged code)
 
@@ -164,230 +152,6 @@ fn print_access_logs(logs: &[AccessSession]) {
     }
 }
 
-fn print_domain_tags(tags: &[DomainTag]) {
-    if tags.is_empty() {
-        println!("No domain tags configured.");
-        return;
-    }
-    println!("\n{:<6} | {:<20} | {:<20}", "ID", "SLD", "Tag");
-    println!("{}", "-".repeat(53));
-    for t in tags {
-        println!("{:<6} | {:<20} | {:<20}", t.id, t.sld, t.tag);
-    }
-}
-
-fn manage_domain_tags(policy: &Policy) -> Result<(), Box<dyn std::error::Error>> {
-    loop {
-        println!("\n=== Domain Tag Management ===");
-        println!("1. List Domain Tags");
-        println!("2. Add Domain Tag");
-        println!("3. Delete Domain Tag");
-        println!("4. Back");
-
-        let choice = prompt("Select: ");
-        match choice.as_str() {
-            "1" => match policy.get_all_domain_tags() {
-                Ok(tags) => print_domain_tags(&tags),
-                Err(e) => println!("Error: {}", e),
-            },
-            "2" => {
-                let input = prompt("Domain: ").to_lowercase();
-                if input.is_empty() {
-                    continue;
-                }
-                let sld = kintate_proxy::policy::extract_sld(&input);
-                let tag = prompt(&format!("Tag name for SLD '{}': ", sld));
-                if tag.is_empty() {
-                    continue;
-                }
-                policy.add_domain_tag(&sld, &tag)?;
-                println!("Added: '{}' -> '{}'", sld, tag);
-            }
-            "3" => {
-                let sld = prompt("Enter SLD to delete: ").to_lowercase();
-                policy.delete_domain_tag(&sld)?;
-                println!("Deleted.");
-            }
-            "4" => return Ok(()),
-            _ => println!("Invalid choice."),
-        }
-    }
-}
-
-fn print_limit_rules(rules: &[LimitRule]) {
-    if rules.is_empty() {
-        println!("No limits configured.");
-        return;
-    }
-    println!("\n{:<6} | {:<20} | {:<15}", "ID", "Tag", "Max Duration");
-    println!("{}", "-".repeat(45));
-    for r in rules {
-        println!(
-            "{:<6} | {:<20} | {:>4} min",
-            r.id,
-            r.tag,
-            r.max_duration_secs / 60
-        );
-    }
-    println!();
-}
-
-fn manage_limits(limit_manager: &LimitManager) -> Result<(), Box<dyn std::error::Error>> {
-    loop {
-        println!("\n=== Usage Limit Management ===");
-        println!("1. List Limits");
-        println!("2. Set Limit");
-        println!("3. Delete Limit");
-        println!("4. Back");
-
-        let choice = prompt("Select: ");
-        match choice.as_str() {
-            "1" => match limit_manager.get_all_limits() {
-                Ok(rules) => print_limit_rules(&rules),
-                Err(e) => println!("Error: {}", e),
-            },
-            "2" => {
-                let tag = prompt("Tag to limit (e.g. Social): ");
-                if tag.is_empty() {
-                    continue;
-                }
-                let mins_str = prompt("Max minutes per day: ");
-                if let Ok(mins) = mins_str.parse::<i64>() {
-                    limit_manager.add_limit(&tag, mins * 60)?;
-                    println!("Limit set: {} -> {} min/day", tag, mins);
-                } else {
-                    println!("Invalid duration.");
-                }
-            }
-            "3" => {
-                let tag = prompt("Enter tag to remove limit: ");
-                limit_manager.delete_limit(&tag)?;
-                println!("Limit removed.");
-            }
-            "4" => return Ok(()),
-            _ => println!("Invalid choice."),
-        }
-    }
-}
-
-/// Interactive policy management
-fn interactive_manage(
-    policy: &Policy,
-    limit_manager: &LimitManager,
-) -> Result<(), Box<dyn std::error::Error>> {
-    loop {
-        println!("\n=== Management Menu ===");
-        println!("1. List Rules");
-        println!("2. Add Rule");
-        println!("3. Delete Rule");
-        println!("4. View Access Logs");
-        println!("5. Manage Domain Tags");
-        println!("6. Manage Usage Limits");
-        println!("7. Clear Access Logs");
-        println!("8. Exit");
-
-        let choice = prompt("Select: ");
-
-        match choice.as_str() {
-            "1" => {
-                let rules = policy.get_all_rules();
-                if rules.is_empty() {
-                    println!("No rules found.");
-                } else {
-                    println!(
-                        "\n{:<4} | {:<8} | {:<5} | {:<20} | {:<15} | {:<15} | {:<20}",
-                        "ID", "Priority", "Action", "Domain", "Tag", "Client IP", "Name"
-                    );
-                    println!("{:-<100}", "");
-                    for rule in rules {
-                        let data = &rule.data;
-                        println!(
-                            "{:<4} | {:<8} | {:<5} | {:<20} | {:<15} | {:<15} | {:<20}",
-                            rule.id,
-                            data.priority,
-                            match data.action {
-                                Action::Allow => "Allow",
-                                Action::Block => "Block",
-                            },
-                            data.domain.as_deref().unwrap_or("*"),
-                            data.tag.as_deref().unwrap_or("*"),
-                            data.client_ip.as_deref().unwrap_or("*"),
-                            data.name.as_deref().unwrap_or("-")
-                        );
-                    }
-                }
-            }
-            "2" => {
-                println!("\n--- Add New Rule ---");
-                let prio_str = prompt("Priority (e.g. 10): ");
-                let priority: i32 = prio_str.parse().unwrap_or(100);
-
-                let action_str = prompt("Action (Allow/Block): ");
-                let action = if action_str.eq_ignore_ascii_case("allow") {
-                    Action::Allow
-                } else {
-                    Action::Block
-                };
-
-                let name = prompt_opt("Rule Name (optional): ");
-                let domain = prompt_opt("Target Domain (optional): ");
-                let tag = prompt_opt("Target Tag (optional): ");
-                let path_pattern = prompt_opt("Path Regex (optional): ");
-                let client_ip = prompt_opt("Client IP (optional): ");
-
-                policy.insert_rule(RuleData {
-                    priority,
-                    action,
-                    name,
-                    domain,
-                    tag,
-                    path_pattern,
-                    client_ip,
-                })?;
-
-                println!("Rule added successfully.");
-            }
-            "3" => {
-                let id_str = prompt("Enter Rule ID to delete: ");
-                if let Ok(id) = id_str.parse::<i64>() {
-                    policy.delete_rule(id)?;
-                    println!("Rule deleted.");
-                } else {
-                    println!("Invalid ID.");
-                }
-            }
-            "4" => {
-                let limit_str = prompt("Show last N records (default: 50): ");
-                let limit = limit_str.parse::<usize>().unwrap_or(50);
-                let ip_str = prompt("Filter by IP (leave blank for all): ");
-                let ip_filter = if ip_str.is_empty() {
-                    None
-                } else {
-                    Some(ip_str.as_str())
-                };
-                match policy.get_access_logs(limit, ip_filter, None) {
-                    Ok(logs) => print_access_logs(&logs),
-                    Err(e) => println!("Error: {}", e),
-                }
-            }
-            "5" => {
-                manage_domain_tags(policy)?;
-            }
-            "6" => {
-                manage_limits(limit_manager)?;
-            }
-            "7" => {
-                let confirm = prompt("Clear all logs? (y/N): ");
-                if confirm.to_lowercase() == "y" {
-                    policy.clear_access_logs()?;
-                }
-            }
-            "8" => return Ok(()),
-            _ => println!("Invalid choice."),
-        }
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let opt = Opt::parse();
@@ -424,8 +188,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let l = limit_manager.clone();
                 let s = shutdown_tx.clone();
                 tokio::task::spawn_blocking(move || {
-                    if let Err(e) = interactive_manage(&p, &l) {
-                        tracing::error!("Interactive Error: {}", e);
+                    let mut app = TuiApp::new(p, l);
+                    if let Err(e) = app.run() {
+                        tracing::error!("TUI Error: {}", e);
                     }
                     if let Ok(mut lock) = s.lock() {
                         if let Some(tx) = lock.take() {
@@ -455,10 +220,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             policy_proxy.serve(addr, shutdown_rx).await?;
         }
         Some(Command::Manage) => {
-            interactive_manage(&policy, &limit_manager)?;
+            let mut app = TuiApp::new(policy, limit_manager);
+            app.run()?;
         }
-        _ => {
-            println!("See --help for usage.");
+        Some(Command::List) => {
+            let rules = policy.get_all_rules();
+            if rules.is_empty() {
+                println!("No rules found.");
+            } else {
+                for rule in rules {
+                    println!(
+                        "ID {}: Priority {} [{:?}] -> Tag: {:?}",
+                        rule.id, rule.data.priority, rule.data.action, rule.data.tag
+                    );
+                }
+            }
+        }
+        Some(Command::Logs { limit, ip }) => {
+            let logs = policy.get_access_logs(limit, ip.as_deref(), None)?;
+            print_access_logs(&logs);
+        }
+        None => {
+            println!("Use --help to see available commands.");
         }
     }
 

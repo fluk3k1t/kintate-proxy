@@ -16,7 +16,9 @@
 pub mod policy;
 pub mod proxy;
 pub mod limit;
+pub mod tui_app;
 
 pub use policy::{AccessSession, Action, DomainTag, Policy, Rule, RuleData};
 pub use proxy::PolicyProxy;
 pub use limit::{LimitManager, LimitRule};
+pub use tui_app::App as TuiApp;
