@@ -8,14 +8,14 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use kintate_proxy::limit::LimitManager;
-use kintate_proxy::policy::{Policy, AccessSession};
+use kintate_proxy::policy::{AccessSession, Policy};
 use kintate_proxy::proxy::PolicyProxy;
 use kintate_proxy::tui_app::{App as TuiApp, TuiLogger};
 use moka::sync::Cache;
 use rcgen::Issuer;
 use std::sync::{Arc, Mutex};
-use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::prelude::*;
 
 /// Command-line arguments
 #[derive(Parser)]
@@ -46,6 +46,9 @@ enum Command {
         /// Enable interactive policy management while serving
         #[arg(long)]
         manage: bool,
+        /// Idle timeout for session aggregation in seconds (default: 60)
+        #[arg(long, default_value = "60")]
+        session_timeout: i64,
     },
     /// Manage policies interactively
     Manage,
@@ -103,8 +106,6 @@ fn create_new_root_issuer() -> Issuer<'static, rcgen::KeyPair> {
     rcgen::Issuer::new(params, signing_key)
 }
 
-
-
 // ... (skipping some unchanged code)
 
 fn print_access_logs(logs: &[AccessSession]) {
@@ -161,9 +162,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let error_logs = Arc::new(Mutex::new(Vec::new()));
     let tui_logger = TuiLogger::new(error_logs.clone());
 
+    let is_tui = match &opt.command {
+        Some(Command::Serve { manage, .. }) => *manage,
+        Some(Command::Manage) => true,
+        _ => false,
+    };
+
+    let fmt_layer = if is_tui {
+        None
+    } else {
+        Some(tracing_subscriber::fmt::layer())
+    };
+
     tracing_subscriber::registry()
         .with(EnvFilter::from_default_env())
-        .with(tracing_subscriber::fmt::layer()) // Still keep console for non-TUI runs
+        .with(fmt_layer)
         .with(tui_logger)
         .init();
 
@@ -176,6 +189,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             private_key,
             listen,
             manage,
+            session_timeout,
         }) => {
             let root_issuer = if let (Some(cert_path), Some(key_path)) = (cert, private_key) {
                 create_root_issuer_from_files(&cert_path, &key_path)?
@@ -214,8 +228,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                    // First flush sessions to DB (idle for 5 mins)
-                    if let Err(e) = policy_for_limits.sweep_sessions(300) {
+                    // First flush sessions to DB (using configured idle timeout)
+                    if let Err(e) = policy_for_limits.sweep_sessions(session_timeout) {
                         tracing::error!("Failed to sweep: {}", e);
                     }
                     // Then enforce limits

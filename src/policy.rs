@@ -88,7 +88,6 @@ impl Policy {
     pub fn new(db_path: &str) -> SqliteResult<Self> {
         let conn = Connection::open(db_path)?;
 
-
         conn.execute(
             "CREATE TABLE IF NOT EXISTS rules (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -238,7 +237,10 @@ impl Policy {
     /// Delete all rules that match a specific name pattern (used for dynamic blocks)
     pub fn delete_rules_by_name(&self, name_pattern: &str) -> SqliteResult<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM rules WHERE name LIKE ?1", params![name_pattern])?;
+        conn.execute(
+            "DELETE FROM rules WHERE name LIKE ?1",
+            params![name_pattern],
+        )?;
         drop(conn);
         self.reload_cache()?;
         Ok(())
@@ -404,10 +406,7 @@ impl Policy {
         Ok(rows)
     }
 
-    pub fn get_combined_logs(
-        &self,
-        limit: usize,
-    ) -> SqliteResult<Vec<LogEntry>> {
+    pub fn get_combined_logs(&self, limit: usize) -> SqliteResult<Vec<LogEntry>> {
         let mut combined = Vec::new();
 
         // 1. Get active sessions
