@@ -203,7 +203,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             let proxy = http_mitm_proxy::MitmProxy::new(Some(root_issuer), Some(Cache::new(128)));
-            let policy_proxy = PolicyProxy::new(proxy, policy.clone());
+            
+            let search_history = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let ctx = kintate_proxy::handlers::HandlerContext { search_history: search_history.clone() };
+            let handlers = std::sync::Arc::new(kintate_proxy::handlers::DomainHandlers::new());
+
+            let policy_proxy = PolicyProxy::new(proxy, policy.clone(), handlers, ctx);
             let addr: SocketAddr = listen.parse()?;
 
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -214,8 +219,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let l = limit_manager.clone();
                 let s = shutdown_tx.clone();
                 let e = error_logs.clone();
+                let sh = search_history.clone();
                 tokio::task::spawn_blocking(move || {
-                    let mut app = TuiApp::new(p, l, e);
+                    let mut app = TuiApp::new(p, l, e, sh);
                     if let Err(err) = app.run() {
                         tracing::error!("TUI Error: {}", err);
                     }
@@ -257,7 +263,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             policy_proxy.serve(addr, shutdown_rx).await?;
         }
         Some(Command::Manage) => {
-            let mut app = TuiApp::new(policy, limit_manager, error_logs);
+            let search_history = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut app = TuiApp::new(policy, limit_manager, error_logs, search_history);
             app.run()?;
         }
         Some(Command::List) => {

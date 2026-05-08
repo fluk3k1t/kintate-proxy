@@ -1,6 +1,8 @@
 //! PolicyProxy - A MITM proxy wrapper with policy-based URL filtering
 
 use crate::policy::{Action, Policy, extract_domain, extract_path};
+use crate::handlers::{DomainHandlers, HandlerContext};
+use std::sync::Arc;
 use http_body_util::BodyExt;
 use http_mitm_proxy::{
     DefaultClient, MitmProxy, RemoteAddr,
@@ -11,13 +13,22 @@ use tracing::info;
 pub struct PolicyProxy {
     inner: MitmProxy<rcgen::Issuer<'static, rcgen::KeyPair>>,
     policy: Policy,
+    handlers: Arc<DomainHandlers>,
+    ctx: HandlerContext,
 }
 
 impl PolicyProxy {
-    pub fn new(proxy: MitmProxy<rcgen::Issuer<'static, rcgen::KeyPair>>, policy: Policy) -> Self {
+    pub fn new(
+        proxy: MitmProxy<rcgen::Issuer<'static, rcgen::KeyPair>>, 
+        policy: Policy,
+        handlers: Arc<DomainHandlers>,
+        ctx: HandlerContext,
+    ) -> Self {
         Self {
             inner: proxy,
             policy,
+            handlers,
+            ctx,
         }
     }
 
@@ -28,6 +39,8 @@ impl PolicyProxy {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let client = DefaultClient::new();
         let policy = self.policy;
+        let handlers = self.handlers;
+        let ctx = self.ctx;
 
         let policy_for_gc = policy.clone();
         let server = self
@@ -37,7 +50,9 @@ impl PolicyProxy {
                 service_fn(move |req| {
                     let client = client.clone();
                     let policy = policy.clone();
-                    async move { handle_request(req, client, policy).await }
+                    let handlers = handlers.clone();
+                    let ctx = ctx.clone();
+                    async move { handle_request(req, client, policy, handlers, ctx).await }
                 }),
             )
             .await?;
@@ -70,6 +85,8 @@ async fn handle_request(
     req: Request<Incoming>,
     client: DefaultClient,
     policy: Policy,
+    handlers: Arc<DomainHandlers>,
+    ctx: HandlerContext,
 ) -> Result<
     Response<
         http_body_util::combinators::BoxBody<
@@ -86,6 +103,9 @@ async fn handle_request(
     let domain = extract_domain(&url);
     let path = extract_path(&url);
     let client_ip = remote_addr.map(|addr| addr.ip().to_string());
+
+    // Execute domain handlers
+    handlers.execute(&domain, req.uri(), &ctx);
 
     let action = policy.evaluate(&domain, &path, client_ip.as_deref());
 

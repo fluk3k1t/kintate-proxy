@@ -1452,6 +1452,7 @@ dependencies = [
  "hyper-util",
  "moka",
  "native-tls",
+ "percent-encoding",
  "ratatui",
  "rcgen",
  "regex",

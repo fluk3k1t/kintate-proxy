@@ -11,7 +11,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Tabs, List, ListItem, ListState},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Tabs, List, ListItem, ListState},
     Terminal,
 };
 use std::{error::Error, io, time::{Duration, Instant}, sync::{Arc, Mutex}};
@@ -23,11 +23,12 @@ enum Tab {
     Tags,
     Limits,
     Errors,
+    Search,
 }
 
 impl Tab {
     fn all() -> Vec<Tab> {
-        vec![Tab::Rules, Tab::Logs, Tab::Tags, Tab::Limits, Tab::Errors]
+        vec![Tab::Rules, Tab::Logs, Tab::Tags, Tab::Limits, Tab::Errors, Tab::Search]
     }
 
     fn title(&self) -> &'static str {
@@ -37,6 +38,7 @@ impl Tab {
             Tab::Tags => " Tags (T) ",
             Tab::Limits => " Limits (U) ",
             Tab::Errors => " Errors (E) ",
+            Tab::Search => " Search (S) ",
         }
     }
 }
@@ -104,6 +106,7 @@ pub struct App {
     tags: Vec<DomainTag>,
     limits: Vec<LimitRule>,
     error_logs: Arc<Mutex<Vec<String>>>,
+    search_history: Arc<Mutex<Vec<String>>>,
 
     // Selection states
     rule_state: TableState,
@@ -111,6 +114,7 @@ pub struct App {
     tag_state: TableState,
     limit_state: TableState,
     error_state: ListState,
+    search_state: ListState,
 
     // Form states
     form_fields: Vec<(String, String)>, // (Label, Value)
@@ -120,7 +124,12 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(policy: Policy, limit_manager: LimitManager, error_logs: Arc<Mutex<Vec<String>>>) -> Self {
+    pub fn new(
+        policy: Policy, 
+        limit_manager: LimitManager, 
+        error_logs: Arc<Mutex<Vec<String>>>,
+        search_history: Arc<Mutex<Vec<String>>>,
+    ) -> Self {
         Self {
             policy,
             limit_manager,
@@ -132,11 +141,13 @@ impl App {
             tags: Vec::new(),
             limits: Vec::new(),
             error_logs,
+            search_history,
             rule_state: TableState::default().with_selected(Some(0)),
             log_state: TableState::default().with_selected(Some(0)),
             tag_state: TableState::default().with_selected(Some(0)),
             limit_state: TableState::default().with_selected(Some(0)),
             error_state: ListState::default().with_selected(Some(0)),
+            search_state: ListState::default().with_selected(Some(0)),
             form_fields: Vec::new(),
             form_focus: 0,
             last_update: Instant::now(),
@@ -283,12 +294,32 @@ impl App {
             return;
         }
 
+        if self.active_tab == Tab::Search {
+            let len = self.search_history.lock().unwrap().len();
+            if len == 0 { return; }
+            let i = match self.search_state.selected() {
+                Some(i) => {
+                    let next = i as i32 + delta;
+                    if next < 0 {
+                        0
+                    } else if next >= len as i32 {
+                        len - 1
+                    } else {
+                        next as usize
+                    }
+                }
+                None => 0,
+            };
+            self.search_state.select(Some(i));
+            return;
+        }
+
         let (state, len) = match self.active_tab {
             Tab::Rules => (&mut self.rule_state, self.rules.len()),
             Tab::Logs => (&mut self.log_state, self.logs.len()),
             Tab::Tags => (&mut self.tag_state, self.tags.len()),
             Tab::Limits => (&mut self.limit_state, self.limits.len()),
-            Tab::Errors => unreachable!(),
+            Tab::Errors | Tab::Search => unreachable!(),
         };
 
         if len == 0 {
@@ -414,11 +445,13 @@ impl App {
                     }
                 }
             }
-            Tab::Logs | Tab::Errors => {
+            Tab::Logs | Tab::Errors | Tab::Search => {
                 if self.active_tab == Tab::Logs {
                     self.policy.clear_access_logs()?;
-                } else {
+                } else if self.active_tab == Tab::Errors {
                     self.error_logs.lock().unwrap().clear();
+                } else {
+                    self.search_history.lock().unwrap().clear();
                 }
             }
         }
@@ -542,6 +575,7 @@ impl App {
             Tab::Tags => self.render_tags(f, chunks[1]),
             Tab::Limits => self.render_limits(f, chunks[1]),
             Tab::Errors => self.render_errors(f, chunks[1]),
+            Tab::Search => self.render_search(f, chunks[1]),
         }
 
         // Footer
@@ -709,11 +743,13 @@ impl App {
         if self.input_mode == InputMode::ConfirmDelete {
             let block = Block::default().title(" Confirm Deletion ").borders(Borders::ALL).bg(Color::Black);
             let popup_area = self.centered_rect(40, 20, area);
+            f.render_widget(Clear, popup_area);
             f.render_widget(block, popup_area);
 
             let msg = match self.active_tab {
                 Tab::Logs => "Are you sure you want to CLEAR ALL access logs? (y/n)",
                 Tab::Errors => "Are you sure you want to CLEAR ALL error logs? (y/n)",
+                Tab::Search => "Are you sure you want to CLEAR ALL search history? (y/n)",
                 _ => "Are you sure you want to delete the selected item? (y/n)",
             };
 
@@ -736,6 +772,7 @@ impl App {
             .borders(Borders::ALL)
             .bg(Color::Black);
         let popup_area = self.centered_rect(60, 80, area);
+        f.render_widget(Clear, popup_area);
         f.render_widget(block, popup_area);
 
         let inner_chunks = Layout::default()
@@ -829,5 +866,22 @@ impl App {
             .highlight_symbol(">> ");
 
         f.render_stateful_widget(list, area, &mut self.error_state);
+    }
+
+    fn render_search(&mut self, f: &mut ratatui::Frame, area: Rect) {
+        let history = self.search_history.lock().unwrap();
+        let items: Vec<ListItem> = history
+            .iter()
+            .map(|query| {
+                ListItem::new(query.as_str()).style(Style::default().fg(Color::Cyan))
+            })
+            .collect();
+
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL).title(" Google Search History "))
+            .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+            .highlight_symbol(">> ");
+
+        f.render_stateful_widget(list, area, &mut self.search_state);
     }
 }
