@@ -89,6 +89,7 @@ enum InputMode {
     EditingTag(String),
     AddingLimit,
     EditingLimit(String),
+    ConfirmDelete,
 }
 
 pub struct App {
@@ -179,11 +180,21 @@ impl App {
                             KeyCode::Char('r') => self.refresh_data(),
                             KeyCode::Char('a') => self.init_add_mode(),
                             KeyCode::Char('e') => self.init_edit_mode(),
-                            KeyCode::Char('d') => self.delete_selected()?,
+                            KeyCode::Char('d') => self.input_mode = InputMode::ConfirmDelete,
                             KeyCode::Up => self.move_selection(-1),
                             KeyCode::Down => self.move_selection(1),
                             KeyCode::PageUp => self.move_selection(-15),
                             KeyCode::PageDown => self.move_selection(15),
+                            _ => {}
+                        },
+                        InputMode::ConfirmDelete => match key.code {
+                            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                                self.delete_selected()?;
+                                self.input_mode = InputMode::Viewing;
+                            }
+                            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                                self.input_mode = InputMode::Viewing;
+                            }
                             _ => {}
                         },
                         _ => match key.code {
@@ -695,6 +706,26 @@ impl App {
     }
 
     fn render_popup(&self, f: &mut ratatui::Frame, area: Rect) {
+        if self.input_mode == InputMode::ConfirmDelete {
+            let block = Block::default().title(" Confirm Deletion ").borders(Borders::ALL).bg(Color::Black);
+            let popup_area = self.centered_rect(40, 20, area);
+            f.render_widget(block, popup_area);
+
+            let msg = match self.active_tab {
+                Tab::Logs => "Are you sure you want to CLEAR ALL access logs? (y/n)",
+                Tab::Errors => "Are you sure you want to CLEAR ALL error logs? (y/n)",
+                _ => "Are you sure you want to delete the selected item? (y/n)",
+            };
+
+            let p = Paragraph::new(msg)
+                .alignment(ratatui::layout::Alignment::Center)
+                .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
+            
+            let inner_area = self.centered_rect(80, 50, popup_area);
+            f.render_widget(p, inner_area);
+            return;
+        }
+
         let title = match self.input_mode {
             InputMode::AddingRule | InputMode::AddingTag | InputMode::AddingLimit => " Add New Item ",
             _ => " Edit Item ",

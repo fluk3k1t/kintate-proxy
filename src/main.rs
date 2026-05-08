@@ -11,6 +11,7 @@ use kintate_proxy::limit::LimitManager;
 use kintate_proxy::policy::{AccessSession, Policy};
 use kintate_proxy::proxy::PolicyProxy;
 use kintate_proxy::tui_app::{App as TuiApp, TuiLogger};
+use kintate_proxy::api::serve_api;
 use moka::sync::Cache;
 use rcgen::Issuer;
 use std::sync::{Arc, Mutex};
@@ -49,6 +50,9 @@ enum Command {
         /// Idle timeout for session aggregation in seconds (default: 60)
         #[arg(long, default_value = "60")]
         session_timeout: i64,
+        /// Address to listen on for the API server (e.g. 127.0.0.1:3005)
+        #[arg(long)]
+        api_listen: Option<String>,
     },
     /// Manage policies interactively
     Manage,
@@ -190,6 +194,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             listen,
             manage,
             session_timeout,
+            api_listen,
         }) => {
             let root_issuer = if let (Some(cert_path), Some(key_path)) = (cert, private_key) {
                 create_root_issuer_from_files(&cert_path, &key_path)?
@@ -218,6 +223,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Some(tx) = lock.take() {
                             let _ = tx.send(());
                         }
+                    }
+                });
+            }
+
+            if let Some(api_addr_str) = api_listen {
+                let api_addr: SocketAddr = api_addr_str.parse()?;
+                let policy_for_api = policy.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = serve_api(policy_for_api, api_addr).await {
+                        tracing::error!("API server error: {}", e);
                     }
                 });
             }

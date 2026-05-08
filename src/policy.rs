@@ -5,7 +5,7 @@ use rusqlite::{Connection, Result as SqliteResult, params};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Action {
     Allow,
     Block,
@@ -28,6 +28,7 @@ impl Action {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RuleData {
     pub priority: i32,
     pub action: Action,
@@ -38,13 +39,15 @@ pub struct RuleData {
     pub client_ip: Option<String>,
 }
 
+#[derive(serde::Serialize)]
 pub struct Rule {
     pub id: i64,
     pub data: RuleData,
+    #[serde(skip)]
     pub compiled_regex: Option<Regex>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AccessSession {
     pub device_ip: String,
     pub target_domain: String,
@@ -57,7 +60,7 @@ pub struct AccessSession {
     pub request_count: i32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DomainTag {
     pub id: i64,
     pub sld: String,
@@ -72,13 +75,13 @@ pub struct Policy {
     tag_cache: Arc<RwLock<HashMap<String, String>>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LogStatus {
     Active,
     Persistent,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct LogEntry {
     pub session: AccessSession,
     pub status: LogStatus,
