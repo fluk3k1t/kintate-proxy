@@ -45,3 +45,6 @@ serde = { version = "1.0.218", features = ["derive", "rc"] }
 serde_json = "1.0.138"
 tower-http = { version = "0.6.2", features = ["cors"] }
 percent-encoding = "2.3.2"
+common-access-token = "0.2.7"
+rand = "0.10.1"
+base64 = "0.22.1"

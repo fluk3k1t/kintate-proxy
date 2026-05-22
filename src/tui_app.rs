@@ -1,20 +1,28 @@
-use crate::policy::{Action, DomainTag, LogStatus, LogEntry, Policy, Rule, RuleData};
-use chrono::Local;
 use crate::limit::{LimitManager, LimitRule};
+use crate::policy::{Action, DomainTag, LogEntry, LogStatus, Policy, Rule, RuleData};
+use chrono::Local;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
+    Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Tabs, List, ListItem, ListState},
-    Terminal,
+    widgets::{
+        Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState,
+        Tabs,
+    },
 };
-use std::{error::Error, io, time::{Duration, Instant}, sync::{Arc, Mutex}};
+use std::{
+    error::Error,
+    io,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -28,7 +36,14 @@ enum Tab {
 
 impl Tab {
     fn all() -> Vec<Tab> {
-        vec![Tab::Rules, Tab::Logs, Tab::Tags, Tab::Limits, Tab::Errors, Tab::Search]
+        vec![
+            Tab::Rules,
+            Tab::Logs,
+            Tab::Tags,
+            Tab::Limits,
+            Tab::Errors,
+            Tab::Search,
+        ]
     }
 
     fn title(&self) -> &'static str {
@@ -125,8 +140,8 @@ pub struct App {
 
 impl App {
     pub fn new(
-        policy: Policy, 
-        limit_manager: LimitManager, 
+        policy: Policy,
+        limit_manager: LimitManager,
         error_logs: Arc<Mutex<Vec<String>>>,
         search_history: Arc<Mutex<Vec<String>>>,
     ) -> Self {
@@ -276,7 +291,9 @@ impl App {
     fn move_selection(&mut self, delta: i32) {
         if self.active_tab == Tab::Errors {
             let len = self.error_logs.lock().unwrap().len();
-            if len == 0 { return; }
+            if len == 0 {
+                return;
+            }
             let i = match self.error_state.selected() {
                 Some(i) => {
                     let next = i as i32 + delta;
@@ -296,7 +313,9 @@ impl App {
 
         if self.active_tab == Tab::Search {
             let len = self.search_history.lock().unwrap().len();
-            if len == 0 { return; }
+            if len == 0 {
+                return;
+            }
             let i = match self.search_state.selected() {
                 Some(i) => {
                     let next = i as i32 + delta;
@@ -385,9 +404,18 @@ impl App {
                         self.form_fields = vec![
                             ("Priority".to_string(), rule.data.priority.to_string()),
                             ("Action".to_string(), rule.data.action.as_str().to_string()),
-                            ("Domain".to_string(), rule.data.domain.as_deref().unwrap_or("").to_string()),
-                            ("Tag".to_string(), rule.data.tag.as_deref().unwrap_or("").to_string()),
-                            ("Name".to_string(), rule.data.name.as_deref().unwrap_or("").to_string()),
+                            (
+                                "Domain".to_string(),
+                                rule.data.domain.as_deref().unwrap_or("").to_string(),
+                            ),
+                            (
+                                "Tag".to_string(),
+                                rule.data.tag.as_deref().unwrap_or("").to_string(),
+                            ),
+                            (
+                                "Name".to_string(),
+                                rule.data.name.as_deref().unwrap_or("").to_string(),
+                            ),
                             ("[Update]".to_string(), "".to_string()),
                         ];
                     }
@@ -411,7 +439,10 @@ impl App {
                         self.input_mode = InputMode::EditingLimit(limit.tag.clone());
                         self.form_fields = vec![
                             ("Tag (Read-only)".to_string(), limit.tag.clone()),
-                            ("Max Minutes/Day".to_string(), (limit.max_duration_secs / 60).to_string()),
+                            (
+                                "Max Minutes/Day".to_string(),
+                                (limit.max_duration_secs / 60).to_string(),
+                            ),
                             ("[Update]".to_string(), "".to_string()),
                         ];
                     }
@@ -468,9 +499,21 @@ impl App {
                 } else {
                     Action::Block
                 };
-                let domain = if self.form_fields[2].1.is_empty() { None } else { Some(self.form_fields[2].1.clone()) };
-                let tag = if self.form_fields[3].1.is_empty() { None } else { Some(self.form_fields[3].1.clone()) };
-                let name = if self.form_fields[4].1.is_empty() { None } else { Some(self.form_fields[4].1.clone()) };
+                let domain = if self.form_fields[2].1.is_empty() {
+                    None
+                } else {
+                    Some(self.form_fields[2].1.clone())
+                };
+                let tag = if self.form_fields[3].1.is_empty() {
+                    None
+                } else {
+                    Some(self.form_fields[3].1.clone())
+                };
+                let name = if self.form_fields[4].1.is_empty() {
+                    None
+                } else {
+                    Some(self.form_fields[4].1.clone())
+                };
 
                 let data = RuleData {
                     priority,
@@ -517,10 +560,7 @@ impl App {
 
     fn refresh_data(&mut self) {
         self.rules = self.policy.get_all_rules();
-        self.logs = self
-            .policy
-            .get_combined_logs(50)
-            .unwrap_or_default();
+        self.logs = self.policy.get_combined_logs(50).unwrap_or_default();
         self.tags = self.policy.get_all_domain_tags().unwrap_or_default();
         self.limits = self.limit_manager.get_all_limits().unwrap_or_default();
         self.last_update = Instant::now();
@@ -555,17 +595,20 @@ impl App {
 
         let header_block = Block::default()
             .borders(Borders::ALL)
-            .title(Line::from(" Kintate Proxy Manager ").alignment(ratatui::layout::Alignment::Left))
-            .title(Line::from(format!(" {} ", Local::now().format("%Y-%m-%d %H:%M:%S"))).alignment(ratatui::layout::Alignment::Right));
-
-        let tabs = Tabs::new(titles)
-            .block(header_block)
-            .select(
-                Tab::all()
-                    .into_iter()
-                    .position(|t| t == self.active_tab)
-                    .unwrap(),
+            .title(
+                Line::from(" Kintate Proxy Manager ").alignment(ratatui::layout::Alignment::Left),
+            )
+            .title(
+                Line::from(format!(" {} ", Local::now().format("%Y-%m-%d %H:%M:%S")))
+                    .alignment(ratatui::layout::Alignment::Right),
             );
+
+        let tabs = Tabs::new(titles).block(header_block).select(
+            Tab::all()
+                .into_iter()
+                .position(|t| t == self.active_tab)
+                .unwrap(),
+        );
         f.render_widget(tabs, chunks[0]);
 
         // Content
@@ -626,24 +669,44 @@ impl App {
             ],
         )
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title(" Firewall Rules "))
-        .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Firewall Rules "),
+        )
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
         .highlight_symbol(">> ");
 
         f.render_stateful_widget(t, area, &mut self.rule_state);
     }
 
     fn render_logs(&mut self, f: &mut ratatui::Frame, area: Rect) {
-        let header_cells = ["Status", "Start", "Last", "IP", "Target / Tag", "Action", "Reqs"]
-            .iter()
-            .map(|h| Cell::from(*h).style(Style::default().fg(Color::Yellow)));
+        let header_cells = [
+            "Status",
+            "Start",
+            "Last",
+            "IP",
+            "Target / Tag",
+            "Action",
+            "Reqs",
+        ]
+        .iter()
+        .map(|h| Cell::from(*h).style(Style::default().fg(Color::Yellow)));
         let header = Row::new(header_cells).height(1).bottom_margin(1);
 
         let rows = self.logs.iter().map(|entry| {
             let log = &entry.session;
             let status_style = match entry.status {
-                LogStatus::Active => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                LogStatus::Persistent => Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
+                LogStatus::Active => Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+                LogStatus::Persistent => {
+                    Style::default().fg(Color::Gray).add_modifier(Modifier::DIM)
+                }
             };
             let status_text = match entry.status {
                 LogStatus::Active => "Active",
@@ -679,7 +742,11 @@ impl App {
                 .borders(Borders::ALL)
                 .title(" Access Activity (Combined Active & Saved) "),
         )
-        .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
         .highlight_symbol(">> ");
 
         f.render_stateful_widget(t, area, &mut self.log_state);
@@ -708,7 +775,11 @@ impl App {
                 .borders(Borders::ALL)
                 .title(" Domain -> Tag Mappings "),
         )
-        .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
         .highlight_symbol(">> ");
 
         f.render_stateful_widget(t, area, &mut self.tag_state);
@@ -731,9 +802,19 @@ impl App {
                 Constraint::Percentage(45),
             ],
         )
-        .header(Row::new(vec!["ID", "Tag", "Daily Limit"]).style(Style::default().fg(Color::Yellow)))
-        .block(Block::default().borders(Borders::ALL).title(" Usage Time Limits "))
-        .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+        .header(
+            Row::new(vec!["ID", "Tag", "Daily Limit"]).style(Style::default().fg(Color::Yellow)),
+        )
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Usage Time Limits "),
+        )
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
         .highlight_symbol(">> ");
 
         f.render_stateful_widget(t, area, &mut self.limit_state);
@@ -741,7 +822,10 @@ impl App {
 
     fn render_popup(&self, f: &mut ratatui::Frame, area: Rect) {
         if self.input_mode == InputMode::ConfirmDelete {
-            let block = Block::default().title(" Confirm Deletion ").borders(Borders::ALL).bg(Color::Black);
+            let block = Block::default()
+                .title(" Confirm Deletion ")
+                .borders(Borders::ALL)
+                .bg(Color::Black);
             let popup_area = self.centered_rect(40, 20, area);
             f.render_widget(Clear, popup_area);
             f.render_widget(block, popup_area);
@@ -756,14 +840,16 @@ impl App {
             let p = Paragraph::new(msg)
                 .alignment(ratatui::layout::Alignment::Center)
                 .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
-            
+
             let inner_area = self.centered_rect(80, 50, popup_area);
             f.render_widget(p, inner_area);
             return;
         }
 
         let title = match self.input_mode {
-            InputMode::AddingRule | InputMode::AddingTag | InputMode::AddingLimit => " Add New Item ",
+            InputMode::AddingRule | InputMode::AddingTag | InputMode::AddingLimit => {
+                " Add New Item "
+            }
             _ => " Edit Item ",
         };
 
@@ -797,7 +883,9 @@ impl App {
                         .fg(Color::Black)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::Green).add_modifier(Modifier::DIM)
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::DIM)
                 };
 
                 let button = Paragraph::new(format!("  {}  ", label))
@@ -811,7 +899,9 @@ impl App {
                 f.render_widget(button, inner_chunks[i]);
             } else {
                 let style = if is_focused {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::Gray)
                 };
@@ -861,8 +951,16 @@ impl App {
             .collect();
 
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(" System Errors / Logs "))
-            .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" System Errors / Logs "),
+            )
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
             .highlight_symbol(">> ");
 
         f.render_stateful_widget(list, area, &mut self.error_state);
@@ -872,14 +970,20 @@ impl App {
         let history = self.search_history.lock().unwrap();
         let items: Vec<ListItem> = history
             .iter()
-            .map(|query| {
-                ListItem::new(query.as_str()).style(Style::default().fg(Color::Cyan))
-            })
+            .map(|query| ListItem::new(query.as_str()).style(Style::default().fg(Color::Cyan)))
             .collect();
 
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(" Google Search History "))
-            .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Google Search History "),
+            )
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
             .highlight_symbol(">> ");
 
         f.render_stateful_widget(list, area, &mut self.search_state);

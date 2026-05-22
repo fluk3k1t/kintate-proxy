@@ -2,3 +2,4 @@
 ore_ca.cert
 ore_ca.key
 policy.db
+token.db

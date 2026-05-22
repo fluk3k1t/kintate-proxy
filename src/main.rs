@@ -7,11 +7,13 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use common_access_token::{Algorithm, KeyId, RegisteredClaims, TokenBuilder, current_timestamp};
+use kintate_proxy::TokenManager;
+use kintate_proxy::api::serve_api;
 use kintate_proxy::limit::LimitManager;
 use kintate_proxy::policy::{AccessSession, Policy};
 use kintate_proxy::proxy::PolicyProxy;
 use kintate_proxy::tui_app::{App as TuiApp, TuiLogger};
-use kintate_proxy::api::serve_api;
 use moka::sync::Cache;
 use rcgen::Issuer;
 use std::sync::{Arc, Mutex};
@@ -67,6 +69,8 @@ enum Command {
         #[arg(long)]
         ip: Option<String>,
     },
+    // Generate access token for API server
+    GenerateToken {},
 }
 
 /// Create a root issuer from existing certificate and key files
@@ -203,9 +207,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             let proxy = http_mitm_proxy::MitmProxy::new(Some(root_issuer), Some(Cache::new(128)));
-            
+
             let search_history = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-            let ctx = kintate_proxy::handlers::HandlerContext { search_history: search_history.clone() };
+            let ctx = kintate_proxy::handlers::HandlerContext {
+                search_history: search_history.clone(),
+            };
             let handlers = std::sync::Arc::new(kintate_proxy::handlers::DomainHandlers::new());
 
             let policy_proxy = PolicyProxy::new(proxy, policy.clone(), handlers, ctx);
@@ -283,6 +289,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(Command::Logs { limit, ip }) => {
             let logs = policy.get_access_logs(limit, ip.as_deref(), None)?;
             print_access_logs(&logs);
+        }
+        Some(Command::GenerateToken {}) => {
+            // Create a key for signing and verification
+            let mut token_manager =
+                TokenManager::new("token.db").expect("Failed to create token manager");
         }
         None => {
             println!("Use --help to see available commands.");
