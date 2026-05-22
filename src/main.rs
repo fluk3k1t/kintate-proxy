@@ -71,6 +71,9 @@ enum Command {
     },
     // Generate access token for API server
     GenerateToken {},
+    VerifyToken {
+        token: String,
+    },
 }
 
 /// Create a root issuer from existing certificate and key files
@@ -294,6 +297,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Create a key for signing and verification
             let mut token_manager =
                 TokenManager::new("token.db").expect("Failed to create token manager");
+
+            let generated = token_manager.generate().unwrap();
+
+            println!("{}", generated);
+        }
+        Some(Command::VerifyToken { token }) => {
+            let mut token_manager =
+                TokenManager::new("token.db").expect("Failed to create token manager");
+
+            println!("{:?}", token_manager.verify(&token));
         }
         None => {
             println!("Use --help to see available commands.");
