@@ -193,6 +193,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let policy = Policy::new(opt.database.to_str().unwrap())?;
     let limit_manager = LimitManager::new(policy.clone())?;
+    let token_manager = TokenManager::new("token.db")?;
 
     match opt.command {
         Some(Command::Serve {
@@ -246,7 +247,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let api_addr: SocketAddr = api_addr_str.parse()?;
                 let policy_for_api = policy.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = serve_api(policy_for_api, api_addr).await {
+                    if let Err(e) = serve_api(policy_for_api, token_manager, api_addr).await {
                         tracing::error!("API server error: {}", e);
                     }
                 });

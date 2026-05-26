@@ -2,6 +2,7 @@ use rusqlite::{Connection, Result as SqliteResult};
 use std::sync::Arc;
 use std::sync::Mutex;
 
+#[derive(Clone)]
 pub struct TokenManager {
     conn: Arc<Mutex<Connection>>,
 }
