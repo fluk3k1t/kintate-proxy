@@ -17,6 +17,7 @@ pub mod api;
 pub mod auth;
 pub mod handlers;
 pub mod limit;
+pub mod log;
 pub mod policy;
 pub mod proxy;
 pub mod token;
@@ -24,7 +25,8 @@ pub mod tui_app;
 
 pub use auth::*;
 pub use limit::{LimitManager, LimitRule};
-pub use policy::{AccessSession, Action, DomainTag, Policy, Rule, RuleData};
+pub use log::{AccessLogger, AccessSession, LogEntry, LogStatus};
+pub use policy::{Action, DomainTag, Policy, Rule, RuleData};
 pub use proxy::PolicyProxy;
 pub use token::TokenManager;
 pub use tui_app::App as TuiApp;

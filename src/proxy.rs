@@ -1,32 +1,36 @@
 //! PolicyProxy - A MITM proxy wrapper with policy-based URL filtering
 
-use crate::policy::{Action, Policy, extract_domain, extract_path};
 use crate::handlers::{DomainHandlers, HandlerContext};
-use std::sync::Arc;
+use crate::log::AccessLogger;
+use crate::policy::{Action, Policy, extract_domain, extract_path};
 use http_body_util::BodyExt;
 use http_mitm_proxy::{
     DefaultClient, MitmProxy, RemoteAddr,
     hyper::{Request, Response, body::Incoming, service::service_fn},
 };
+use std::sync::Arc;
 use tracing::info;
 
 pub struct PolicyProxy {
     inner: MitmProxy<rcgen::Issuer<'static, rcgen::KeyPair>>,
     policy: Policy,
+    access_logger: AccessLogger,
     handlers: Arc<DomainHandlers>,
     ctx: HandlerContext,
 }
 
 impl PolicyProxy {
     pub fn new(
-        proxy: MitmProxy<rcgen::Issuer<'static, rcgen::KeyPair>>, 
+        proxy: MitmProxy<rcgen::Issuer<'static, rcgen::KeyPair>>,
         policy: Policy,
+        access_logger: AccessLogger,
         handlers: Arc<DomainHandlers>,
         ctx: HandlerContext,
     ) -> Self {
         Self {
             inner: proxy,
             policy,
+            access_logger,
             handlers,
             ctx,
         }
@@ -39,10 +43,11 @@ impl PolicyProxy {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let client = DefaultClient::new();
         let policy = self.policy;
+        let access_logger = self.access_logger;
         let handlers = self.handlers;
         let ctx = self.ctx;
 
-        let policy_for_gc = policy.clone();
+        let access_logger_for_gc = access_logger.clone();
         let server = self
             .inner
             .bind(
@@ -50,9 +55,12 @@ impl PolicyProxy {
                 service_fn(move |req| {
                     let client = client.clone();
                     let policy = policy.clone();
+                    let access_logger = access_logger.clone();
                     let handlers = handlers.clone();
                     let ctx = ctx.clone();
-                    async move { handle_request(req, client, policy, handlers, ctx).await }
+                    async move {
+                        handle_request(req, client, policy, access_logger, handlers, ctx).await
+                    }
                 }),
             )
             .await?;
@@ -60,7 +68,7 @@ impl PolicyProxy {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                if let Err(e) = policy_for_gc.sweep_sessions(5 * 60) {
+                if let Err(e) = access_logger_for_gc.sweep_sessions(5 * 60) {
                     tracing::error!("Error sweeping access sessions: {}", e);
                 }
             }
@@ -85,6 +93,7 @@ async fn handle_request(
     req: Request<Incoming>,
     client: DefaultClient,
     policy: Policy,
+    access_logger: AccessLogger,
     handlers: Arc<DomainHandlers>,
     ctx: HandlerContext,
 ) -> Result<
@@ -111,7 +120,9 @@ async fn handle_request(
 
     if let Some(ip) = &client_ip {
         let ip_only = ip.split(':').next().unwrap_or(ip);
-        policy.record_access(ip_only, &domain, &action);
+        let sld = crate::policy::extract_sld(&domain);
+        let tag = policy.get_tag(&sld);
+        access_logger.record_access(ip_only, &domain, &action, tag.as_deref());
     }
 
     //tracing::error!("[{}] {} - {:?}", domain, req.method(), action);

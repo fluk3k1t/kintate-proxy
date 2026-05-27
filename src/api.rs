@@ -6,10 +6,13 @@ use axum::{
     response::IntoResponse,
     routing::{delete, get, post},
 };
+use rusqlite::Connection;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::{net::TcpListener, sync::Mutex};
 use tower_http::cors::{Any, CorsLayer};
 
+use crate::limit::LimitManager;
+use crate::log::AccessLogger;
 use crate::token::TokenManager;
 use crate::{
     auth_middleware,
@@ -20,16 +23,22 @@ use crate::{
 pub struct AppState {
     pub policy: Policy,
     pub token_manager: TokenManager,
+    pub limit_manager: LimitManager,
+    pub access_logger: AccessLogger,
 }
 
 pub async fn serve_api(
     policy: Policy,
+    limit_manager: LimitManager,
+    access_logger: AccessLogger,
     token_manager: TokenManager,
     addr: SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state = Arc::new(Mutex::new(AppState {
         policy,
         token_manager,
+        limit_manager,
+        access_logger,
     }));
 
     let cors = CorsLayer::new()
@@ -43,6 +52,7 @@ pub async fn serve_api(
         .route("/api/logs", get(get_logs))
         .route("/api/tags", get(get_tags).post(add_tag))
         .route("/api/tags/{sld}", delete(delete_tag))
+        .route("/api/limits", get(get_limits))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -56,6 +66,8 @@ pub async fn serve_api(
     axum::serve(listener, app).await?;
     Ok(())
 }
+
+async fn get_limits(State(state): State<Arc<Mutex<AppState>>>) -> impl IntoResponse {}
 
 async fn get_rules(State(state): State<Arc<Mutex<AppState>>>) -> impl IntoResponse {
     println!("get_rules");
@@ -91,8 +103,8 @@ async fn delete_rule(
 }
 
 async fn get_logs(State(state): State<Arc<Mutex<AppState>>>) -> impl IntoResponse {
-    // Return last 100 logs
-    match state.lock().await.policy.get_combined_logs(100) {
+    let state = state.lock().await;
+    match state.access_logger.get_combined_logs(100) {
         Ok(logs) => Json(logs).into_response(),
         Err(e) => {
             tracing::error!("Failed to get logs: {}", e);

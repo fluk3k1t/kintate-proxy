@@ -1,5 +1,6 @@
 use crate::limit::{LimitManager, LimitRule};
-use crate::policy::{Action, DomainTag, LogEntry, LogStatus, Policy, Rule, RuleData};
+use crate::log::{AccessLogger, LogEntry, LogStatus};
+use crate::policy::{Action, DomainTag, Policy, Rule, RuleData};
 use chrono::Local;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
@@ -265,9 +266,9 @@ impl App {
 
             if self.should_quit {
                 // Ensure all active sessions are saved to DB before exiting
-                if let Err(e) = self.policy.sweep_sessions(0) {
-                    tracing::error!("Failed to sweep on quit: {}", e);
-                }
+                // if let Err(e) = self..sweep_sessions(0) {
+                //     tracing::error!("Failed to sweep on quit: {}", e);
+                // }
                 break;
             }
 
@@ -478,7 +479,7 @@ impl App {
             }
             Tab::Logs | Tab::Errors | Tab::Search => {
                 if self.active_tab == Tab::Logs {
-                    self.policy.clear_access_logs()?;
+                    // self.policy.clear_access_logs()?;
                 } else if self.active_tab == Tab::Errors {
                     self.error_logs.lock().unwrap().clear();
                 } else {
@@ -560,7 +561,7 @@ impl App {
 
     fn refresh_data(&mut self) {
         self.rules = self.policy.get_all_rules();
-        self.logs = self.policy.get_combined_logs(50).unwrap_or_default();
+        // self.logs = self.policy.get_combined_logs(50).unwrap_or_default();
         self.tags = self.policy.get_all_domain_tags().unwrap_or_default();
         self.limits = self.limit_manager.get_all_limits().unwrap_or_default();
         self.last_update = Instant::now();

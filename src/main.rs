@@ -1,21 +1,16 @@
-//! Kintate Proxy - Sample Application
-//!
-//! This is a sample application that demonstrates how to use the kintate-proxy library
-//! to create a MITM proxy with policy-based URL filtering.
-
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use common_access_token::{Algorithm, KeyId, RegisteredClaims, TokenBuilder, current_timestamp};
-use kintate_proxy::TokenManager;
 use kintate_proxy::api::serve_api;
 use kintate_proxy::limit::LimitManager;
-use kintate_proxy::policy::{AccessSession, Policy};
+use kintate_proxy::policy::Policy;
 use kintate_proxy::proxy::PolicyProxy;
 use kintate_proxy::tui_app::{App as TuiApp, TuiLogger};
+use kintate_proxy::{AccessLogger, AccessSession, TokenManager};
 use moka::sync::Cache;
 use rcgen::Issuer;
+use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
@@ -191,9 +186,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(tui_logger)
         .init();
 
+    let limit_db = Connection::open("limit.db")?;
+    let log_db = Connection::open("access_logs.db")?;
+
     let policy = Policy::new(opt.database.to_str().unwrap())?;
-    let limit_manager = LimitManager::new(policy.clone())?;
+    let limit_manager = LimitManager::new(Arc::new(Mutex::new(limit_db)))?;
     let token_manager = TokenManager::new("token.db")?;
+    let access_logger = AccessLogger::new(Arc::new(Mutex::new(log_db)))?;
 
     match opt.command {
         Some(Command::Serve {
@@ -218,7 +217,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             let handlers = std::sync::Arc::new(kintate_proxy::handlers::DomainHandlers::new());
 
-            let policy_proxy = PolicyProxy::new(proxy, policy.clone(), handlers, ctx);
+            let policy_proxy =
+                PolicyProxy::new(proxy, policy.clone(), access_logger.clone(), handlers, ctx);
             let addr: SocketAddr = listen.parse()?;
 
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -246,8 +246,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(api_addr_str) = api_listen {
                 let api_addr: SocketAddr = api_addr_str.parse()?;
                 let policy_for_api = policy.clone();
+                let limit_manager_for_api = limit_manager.clone();
+                let access_logger_for_api = access_logger.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = serve_api(policy_for_api, token_manager, api_addr).await {
+                    if let Err(e) = serve_api(
+                        policy_for_api,
+                        limit_manager_for_api,
+                        access_logger_for_api,
+                        token_manager,
+                        api_addr,
+                    )
+                    .await
+                    {
                         tracing::error!("API server error: {}", e);
                     }
                 });
@@ -256,17 +266,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Limit Enforcement Task
             let policy_for_limits = policy.clone();
             let limit_manager_for_task = limit_manager.clone();
+            let access_logger_for_task = access_logger.clone();
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                     // First flush sessions to DB (using configured idle timeout)
-                    if let Err(e) = policy_for_limits.sweep_sessions(session_timeout) {
-                        tracing::error!("Failed to sweep: {}", e);
-                    }
+                    // if let Err(e) = policy_for_limits.sweep_sessions(session_timeout) {
+                    //     tracing::error!("Failed to sweep: {}", e);
+                    // }
+                    access_logger_for_task
+                        .sweep_sessions(session_timeout)
+                        .unwrap();
                     // Then enforce limits
-                    if let Err(e) = limit_manager_for_task.enforce() {
-                        tracing::error!("Limit enforcement error: {}", e);
-                    }
+                    // if let Err(e) = limit_manager_for_task.enforce() {
+                    //     tracing::error!("Limit enforcement error: {}", e);
+                    // }
                 }
             });
 
@@ -291,8 +305,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Some(Command::Logs { limit, ip }) => {
-            let logs = policy.get_access_logs(limit, ip.as_deref(), None)?;
-            print_access_logs(&logs);
+            // let logs = policy.get_access_logs(limit, ip.as_deref(), None)?;
+            // print_access_logs(&logs);
         }
         Some(Command::GenerateToken {}) => {
             // Create a key for signing and verification
